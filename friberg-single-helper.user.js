@@ -832,10 +832,12 @@ html[data-theme="light"] .fbs-root, body[data-theme="light"] .fbs-root {
 .fbs-fab {
   width: 52px; height: 52px; border-radius: 50%; border: 1px solid var(--fbs-line);
   background: var(--fbs-bg); color: var(--fbs-accent); font-size: 20px; font-weight: 700;
-  cursor: pointer; box-shadow: 0 8px 24px rgba(0,0,0,.4); display: flex;
+  cursor: grab; box-shadow: 0 8px 24px rgba(0,0,0,.4); display: flex;
   align-items: center; justify-content: center; position: relative;
+  touch-action: none; user-select: none; -webkit-user-select: none;
 }
 .fbs-fab:hover { transform: translateY(-2px); }
+.fbs-fab:active { cursor: grabbing; }
 .fbs-badge {
   position: absolute; top: -4px; right: -4px; min-width: 22px; height: 22px; padding: 0 5px;
   border-radius: 11px; background: var(--fbs-accent); color: #10240f; font-size: 11px;
@@ -969,8 +971,17 @@ html[data-theme="light"] .fbs-field select, html[data-theme="light"] .fbs-field 
 
     fabNode = el('button', 'fbs-fab', '弗');
     fabNode.type = 'button';
-    fabNode.title = '弗一把 · 单人模式助手';
-    fabNode.addEventListener('click', () => setCollapsed(false));
+    fabNode.title = '弗一把 · 单人模式助手（可拖动，点击展开）';
+    // 收起状态下面板整个隐藏，屏幕上只剩这颗球 —— 它必须自己也能拖，
+    // 否则「浮窗拖动不了」。阈值为 4px，避免手抖把点击吃掉。
+    const fabDrag = makeDraggable(fabNode, panelRoot, { threshold: 4, preventDefault: false });
+    fabNode.addEventListener('click', () => {
+      const dragged = fabDrag.wasDragged();
+      fabDrag.reset();
+      if (dragged) return;
+      setCollapsed(false);
+      clampToViewport();
+    });
     panelRoot.appendChild(fabNode);
 
     panelNode = el('div', 'fbs-panel');
@@ -1032,44 +1043,70 @@ html[data-theme="light"] .fbs-field select, html[data-theme="light"] .fbs-field 
     if (!initial) saveJson(STORE.settings, state.settings);
   }
 
-  function makeDraggable(handle, target) {
+  function makeDraggable(handle, target, options) {
+    const opts = options || {};
+    // 阈值：小于它视为「点击」而不是拖动（悬浮球既要能拖、又要能点开）
+    const threshold = opts.threshold || 0;
     let startX = 0;
     let startY = 0;
     let startLeft = 0;
     let startTop = 0;
+    let active = false;
+    let moved = false;
     const onMove = (event) => {
+      if (!active) return;
       const dx = event.clientX - startX;
       const dy = event.clientY - startY;
-      const left = Math.min(Math.max(0, startLeft + dx), window.innerWidth - target.offsetWidth);
-      const top = Math.min(Math.max(0, startTop + dy), window.innerHeight - 40);
+      if (!moved && Math.abs(dx) < threshold && Math.abs(dy) < threshold) return;
+      moved = true;
+      const width = target.offsetWidth || 0;
+      const left = Math.min(Math.max(0, startLeft + dx), Math.max(0, window.innerWidth - width));
+      const top = Math.min(Math.max(0, startTop + dy), Math.max(0, window.innerHeight - 40));
       target.style.left = left + 'px';
       target.style.top = top + 'px';
       target.style.right = 'auto';
       target.style.bottom = 'auto';
+      if (event.cancelable) event.preventDefault();
     };
     const onUp = () => {
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
+      if (!active) return;
+      active = false;
+      if (!moved) return;
       const rect = target.getBoundingClientRect();
       // 同上：隐藏状态下测不到真实矩形，就不要把 0 写成位置
       if (rect.width > 0 && rect.height > 0) {
         state.settings.panelPos = { left: Math.round(rect.left), top: Math.round(rect.top) };
       } else {
-        state.settings.panelPos = { left: Math.round(startLeft), top: Math.round(startTop) };
+        state.settings.panelPos = {
+          left: Math.round(parseFloat(target.style.left) || startLeft),
+          top: Math.round(parseFloat(target.style.top) || startTop),
+        };
       }
       saveJson(STORE.settings, state.settings);
     };
     handle.addEventListener('pointerdown', (event) => {
-      if (event.target.closest('button')) return;
+      // 标题栏里的按钮不要触发拖动；但悬浮球自己就是按钮，要放行
+      if (event.target !== handle && event.target.closest && event.target.closest('button')) return;
+      if (event.button !== undefined && event.button !== 0) return;
       const rect = target.getBoundingClientRect();
+      active = true;
+      moved = false;
       startX = event.clientX;
       startY = event.clientY;
-      startLeft = rect.left;
-      startTop = rect.top;
+      startLeft = rect.left || parseFloat(target.style.left) || 0;
+      startTop = rect.top || parseFloat(target.style.top) || 0;
       document.addEventListener('pointermove', onMove);
       document.addEventListener('pointerup', onUp);
-      event.preventDefault();
+      if (opts.preventDefault !== false && event.cancelable) event.preventDefault();
     });
+    return {
+      wasDragged: () => moved,
+      reset: () => {
+        moved = false;
+      },
+    };
   }
 
   function applyStoredPosition() {
